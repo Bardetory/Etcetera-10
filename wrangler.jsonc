@@ -1,0 +1,16 @@
+{
+  "name": "etcetera-10",
+  "main": "worker.js",
+  "compatibility_date": "2025-11-01",
+  "assets": {
+    "directory": "./",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "etcetera-db",
+      "database_id": "e1058798-d1ea-458f-b820-1f93f6ed1edf"
+    }
+  ]
+}
