@@ -533,6 +533,14 @@ h1,h2,h3,.h2,.q b,.timer,.count b,.endmsg .epct,.score,.stat b,.lvl b,.flame b,.
 .grp summary b{border:2px solid var(--ink)}
 .miss span{border:2px solid var(--ink);border-radius:14px}
 .grp .sw{border:2px solid var(--ink)}
+.rkscopes{margin:6px 0 16px}.rkscopes .chip{padding:6px 13px;font-size:14px}
+.bsub{display:block;font-weight:600;color:var(--ink-2);font-size:12.5px;overflow:hidden;text-overflow:ellipsis}
+.brow .bn{line-height:1.2}
+.medet{display:flex;gap:22px;align-items:center;flex-wrap:wrap;border:3px solid var(--ink);border-radius:34px 24px 36px 26px;background:var(--accent-soft);box-shadow:4px 4px 0 var(--ink);padding:16px 22px;margin-bottom:16px}
+.mscore{display:flex;flex-direction:column;line-height:1}.mscore b{font:400 56px var(--font-display);color:var(--tomato);-webkit-text-stroke:3px var(--ink);paint-order:stroke fill;text-shadow:3px 3px 0 var(--ink)}.mscore small{font-weight:800;margin-top:6px}
+.mbars{flex:1;min-width:220px;display:flex;flex-direction:column;gap:8px}
+.mrow{display:grid;grid-template-columns:88px 1fr 84px;gap:10px;align-items:center;font-size:14px;font-weight:700}.mrow b{text-align:right;font-variant-numeric:tabular-nums}
+.mbar{height:14px;border:2.5px solid var(--ink);border-radius:99px;background:var(--panel);overflow:hidden}.mbar i{display:block;height:100%}
 @media (max-width:640px){
   .card{box-shadow:5px 5px 0 var(--ink);border-radius:40px 26px 42px 30px / 32px 38px 30px 40px}
   .big{box-shadow:4px 4px 0 var(--ink)}
@@ -1196,13 +1204,34 @@ const Account = {
   },
   async sync() {
     if (!this.on()) return; const st = this.load();
-    try { const j = await this.api('sync', { xp: Prof.load().xp, data: Prog.exportCode(), show: st.show !== false }); st.name = j.user.username; st.show = j.user.show; st.week = j.week_xp; st.last = Date.now(); this.save(); }
+    try { const j = await this.api('sync', { xp: Prof.load().xp, data: Prog.exportCode(), show: st.show !== false, rk: Rank.compute() }); st.name = j.user.username; st.show = j.user.show; st.week = j.week_xp; st.last = Date.now(); this.save(); }
     catch (e) { if (e.status === 401) { st.token = ''; this.save(); } }
     renderStrip();
   },
   async logout() { try { await this.api('logout', {}); } catch (e) { } this.load().token = ''; this.save(); }
 };
-const rk = { mode: 'login', scope: 'week', rec: null, del: false };
+/* ---- score de maîtrise : acquis × précision × régularité (0 à 1000), par région et pour le monde ---- */
+const Rank = {
+  score: (m, p, g) => Math.round(1000 * m * (.5 + .5 * p) * (.8 + .2 * g)),
+  reg() { const d = Prof.load(), t0 = dayIdx(dayStr()) - 13, n = new Set(d.days.map(dayIdx).filter(x => x >= t0)).size; return { n, g: Math.min(1, n / 10) }; },
+  compute() {
+    const items = Prog.load().items, now = Date.now(), R = this.reg(), out = {};
+    for (const id of ['w', ...ALLR]) {
+      const list = id === 'w' ? ITEMS : ITEMS.filter(i => i.r.includes(id));
+      let ms = 0, n = 0, f = 0, a = 0, seen = 0;
+      for (const it of list) {
+        const r = items[Prog.key(it)]; if (!r) continue; seen++;
+        let m = Math.min(5, r.b) / 5; if (now > (r.t || 0) + INTERVAL[Math.min(5, r.b)] * DAY * 2) m *= .6;
+        ms += m; n += r.n || 0; f += r.f || 0; if (r.b >= 4) a++;
+      }
+      const m = list.length ? ms / list.length : 0, p = n ? Math.max(0, 1 - f / n) : 0;
+      out[id] = { m: +m.toFixed(4), p: +p.toFixed(4), g: +R.g.toFixed(3), a, t: list.length, seen, days: R.n, s: this.score(m, p, R.g) };
+    }
+    return out;
+  },
+  name: id => id === 'w' ? 'Monde' : REG[id].n
+};
+const rk = { mode: 'login', scope: 'w', rec: null, del: false };
 const avatar = name => { let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360; return '<i class="av" style="background:hsl(' + h + ' 55% 46%)">' + esc([...name][0].toUpperCase()) + '</i>'; };
 function renderRank() {
   const p = $('#pane-rank'); if (!p) return;
@@ -1246,11 +1275,20 @@ function renderRank() {
 }
 function boardCardHTML() {
   const on = Account.on();
-  const fake = ['Alex', 'Camille', 'Jules', 'Léa', 'Sam', 'Inès'].map((n, i) => '<div class="brow"><span class="rn">' + (i + 1) + '</span>' + avatar(n) + '<span class="bn">' + n + '</span><small class="bl">niv. ' + (9 - i) + '</small><b class="bx">' + (2400 - i * 310) + ' XP</b></div>').join('');
-  return '<div class="card boardcard"><div class="rkhead"><h3 class="h3" style="margin:0">🏆 Classement</h3>' +
-    (on ? '<div class="seg"><button type="button" data-sc="week" aria-pressed="' + (rk.scope === 'week') + '">Cette semaine</button><button type="button" data-sc="all" aria-pressed="' + (rk.scope === 'all') + '">Depuis toujours</button></div>' : '') + '</div>' +
-    (on ? '<div id="rk-board" class="board"><p class="small">Chargement…</p></div><p class="small">Classé selon l’XP gagnée. La semaine commence le lundi. L’XP créditée est limitée chaque jour.</p>'
+  const fake = ['Alex', 'Camille', 'Jules', 'Léa', 'Sam', 'Inès'].map((n, i) => '<div class="brow"><span class="rn">' + (i + 1) + '</span>' + avatar(n) + '<span class="bn">' + n + '<small class="bsub">' + (120 - i * 14) + '/206 acquis · ' + (96 - i * 3) + ' % de précision</small></span><small class="bl">niv. ' + (9 - i) + '</small><b class="bx">' + (780 - i * 90) + ' pts</b></div>').join('');
+  const chips = ['w', ...ALLR].map(id => '<button type="button" class="chip" data-sc="' + id + '" aria-pressed="' + (rk.scope === id) + '">' + (id === 'w' ? '🌍 ' : '<i class="rd" style="background:' + RCOL[id] + '"></i>') + esc(Rank.name(id)) + '</button>').join('');
+  return '<div class="card boardcard"><div class="rkhead"><h3 class="h3" style="margin:0">🏆 Classement</h3></div>' +
+    (on ? '<div class="chips rkscopes">' + chips + '</div><div id="rk-me"></div><div id="rk-board" class="board"><p class="small">Chargement…</p></div>' +
+      '<p class="small">Score sur 1 000 : <b>éléments acquis</b> × <b>précision</b> × <b>régularité</b> (jours joués sur les 14 derniers). Un élément qu’on ne révise plus finit par compter moins.</p>'
       : '<div class="locked"><div class="board blur" aria-hidden="true" inert>' + fake + '</div><button class="btn pri unlockbtn" id="rk-join" type="button">Crée-toi un compte pour découvrir le classement</button></div>') + '</div>';
+}
+function meHTML() {
+  const c = Rank.compute()[rk.scope], pct = x => Math.round(x * 100);
+  const bar = (lbl, v, txt, col) => '<div class="mrow"><span>' + lbl + '</span><div class="mbar"><i style="width:' + pct(v) + '%;background:' + col + '"></i></div><b>' + txt + '</b></div>';
+  return '<div class="medet"><div class="mscore"><b>' + c.s + '</b><small>pts · ' + esc(Rank.name(rk.scope)) + '</small></div><div class="mbars">' +
+    bar('Acquis', c.t ? c.a / c.t : 0, c.a + ' / ' + c.t, 'var(--mint)') +
+    bar('Précision', c.p, c.seen ? pct(c.p) + ' %' : '–', 'var(--sky)') +
+    bar('Régularité', c.g, c.days + ' j sur 14', 'var(--pink)') + '</div></div>';
 }
 function bindBoard(w) {
   if (Account.on()) { $$('[data-sc]', w).forEach(b => b.addEventListener('click', () => { rk.scope = b.dataset.sc; $$('[data-sc]', w).forEach(x => x.setAttribute('aria-pressed', x === b)); loadBoard(); })); loadBoard(); }
@@ -1269,17 +1307,17 @@ async function rkSubmit() {
   } catch (e) { msg(e.message, true); btn.disabled = false; }
 }
 async function loadBoard() {
-  const box = $('#rk-board'); if (!box) return; const sc = rk.scope;
+  const box = $('#rk-board'); if (!box) return; const sc = rk.scope, mebox = $('#rk-me'); if (mebox) mebox.innerHTML = meHTML();
   try {
     const j = await Account.api('leaderboard?scope=' + sc); if (rk.scope !== sc || !$('#rk-board')) return;
     const me = Account.on() ? Account.load().name : null, medal = r => r === 1 ? '🥇' : r === 2 ? '🥈' : r === 3 ? '🥉' : r;
-    const row = (r, mine) => '<div class="brow' + (mine ? ' mine' : '') + '"><span class="rn">' + medal(r.rank) + '</span>' + avatar(r.name) + '<span class="bn">' + esc(r.name) + (mine ? ' <small>(toi)</small>' : '') + '</span><small class="bl">niv. ' + r.level + '</small><b class="bx">' + r.score.toLocaleString('fr-FR') + ' XP</b></div>';
+    const row = (r, mine) => '<div class="brow' + (mine ? ' mine' : '') + '"><span class="rn">' + medal(r.rank) + '</span>' + avatar(r.name) + '<span class="bn">' + esc(r.name) + (mine ? ' <small>(toi)</small>' : '') + (r.t ? '<small class="bsub">' + r.a + '/' + r.t + ' acquis · ' + Math.round(r.p * 100) + ' % de précision</small>' : '') + '</span><small class="bl">niv. ' + r.level + '</small><b class="bx">' + r.score.toLocaleString('fr-FR') + ' pts</b></div>';
     let h = j.rows.map(r => row(r, me && r.name.toLowerCase() === me.toLowerCase())).join('');
-    if (!j.rows.length) h = '<p class="small">Personne n’est encore classé' + (sc === 'week' ? ' cette semaine' : '') + '. Joue une partie pour être le premier !</p>';
-    const m = j.me;
-    if (m && !m.hidden && m.rank && m.rank > j.rows.length) h += '<div class="bsep">…</div>' + row({ rank: m.rank, name: m.name, level: Prof.level(), score: m.score }, true);
+    if (!j.rows.length) h = '<p class="small">Personne n’est encore classé dans « ' + esc(Rank.name(sc)) + ' ». Joue une partie pour être le premier !</p>';
+    const m = j.me, loc = Rank.compute()[sc];
+    if (m && !m.hidden && m.rank && m.rank > j.rows.length) h += '<div class="bsep">…</div>' + row({ rank: m.rank, name: m.name, level: Prof.level(), score: m.score, a: loc.a, t: loc.t, p: loc.p }, true);
     if (m && m.hidden) h += '<p class="small">Tu as choisi de ne pas apparaître au classement.</p>';
-    else if (m && !m.rank) h += '<p class="small">Tu n’as pas encore d’XP ' + (sc === 'week' ? 'cette semaine' : '') + ' au classement. Termine une partie !</p>';
+    else if (m && !m.rank) h += '<p class="small">Tu n’as pas encore de score dans cette zone. Termine une partie qui contient ses éléments !</p>';
     box.innerHTML = h;
   } catch (e) { box.innerHTML = '<p class="small">' + esc(e.message) + '</p>'; }
 }
