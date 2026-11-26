@@ -53,23 +53,33 @@ async function auth(db, req) {
   if (!s || now() - s.created > SESSION_DAYS * 86400) return null;
   return db.prepare('SELECT * FROM users WHERE id = ?').bind(s.user_id).first();
 }
+const RIDS = ['w', 'na', 'ca', 'sa', 'af', 'eu', 'ac', 'mo', 'as', 'oc'];
+const clamp01 = x => Math.max(0, Math.min(1, +x || 0));
+// Score de maîtrise (0 à 1000) : éléments acquis × précision × régularité
+const mastery = (m, p, g) => Math.round(1000 * clamp01(m) * (0.5 + 0.5 * clamp01(p)) * (0.8 + 0.2 * clamp01(g)));
+let tableReady = false;
+async function ensureTables(db) {
+  if (tableReady) return;
+  await db.prepare('CREATE TABLE IF NOT EXISTS scores (user_id INTEGER NOT NULL, region TEXT NOT NULL, score INTEGER NOT NULL DEFAULT 0, m REAL NOT NULL DEFAULT 0, p REAL NOT NULL DEFAULT 0, g REAL NOT NULL DEFAULT 0, a INTEGER NOT NULL DEFAULT 0, t INTEGER NOT NULL DEFAULT 0, upd INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, region))').run();
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_scores_rank ON scores(region, score DESC)').run();
+  tableReady = true;
+}
 const pub = u => ({ username: u.display, xp: u.xp, level: u.level, show: !!u.show_rank });
 const ipOf = req => req.headers.get('cf-connecting-ip') || 'x';
 
-async function scoreOf(db, u, week) {
-  const wk = weekKey();
-  const score = week ? (u.week_key === wk ? u.week_xp : 0) : u.xp;
+async function scoreOf(db, u, region) {
+  const mine = await db.prepare('SELECT score, m, p, g, a, t FROM scores WHERE user_id = ? AND region = ?').bind(u.id, region).first();
+  const score = mine ? mine.score : 0;
   if (!u.show_rank) return { name: u.display, score, rank: null, hidden: true };
-  let q, args;
-  if (week) { q = 'SELECT COUNT(*) AS c FROM users WHERE show_rank = 1 AND week_key = ? AND week_xp > ?'; args = [wk, score]; }
-  else { q = 'SELECT COUNT(*) AS c FROM users WHERE show_rank = 1 AND xp > ?'; args = [score]; }
-  const r = await db.prepare(q).bind(...args).first();
-  return { name: u.display, score, rank: score > 0 ? r.c + 1 : null, hidden: false };
+  if (!score) return { name: u.display, score: 0, rank: null, hidden: false };
+  const r = await db.prepare('SELECT COUNT(*) AS c FROM scores s JOIN users x ON x.id = s.user_id WHERE x.show_rank = 1 AND s.region = ? AND (s.score > ? OR (s.score = ? AND s.a > ?))').bind(region, score, score, mine.a).first();
+  return { name: u.display, score, rank: r.c + 1, hidden: false };
 }
 
 async function onRequest({ request, env, params }) {
   const db = env.DB;
   if (!db) return err('Base de données non reliée (liaison D1 « DB » manquante).', 500);
+  try { await ensureTables(db); } catch (e) { return err('Base de données indisponible.', 500); }
   const route = [].concat(params.route || []).join('/');
   const url = new URL(request.url), method = request.method;
   let body = {};
@@ -118,14 +128,12 @@ async function onRequest({ request, env, params }) {
       return json({ token: await newSession(db, u.id), user: pub(u), data: u.data || null, recovery: rec });
     }
     if (route === 'leaderboard' && method === 'GET') {
-      const week = url.searchParams.get('scope') === 'week', wk = weekKey(), u = await auth(db, request);
-      const q = week
-        ? 'SELECT display, level, week_xp AS score FROM users WHERE show_rank = 1 AND week_key = ? AND week_xp > 0 ORDER BY week_xp DESC, id ASC LIMIT ?'
-        : 'SELECT display, level, xp AS score FROM users WHERE show_rank = 1 AND xp > 0 ORDER BY xp DESC, id ASC LIMIT ?';
-      const rs = await (week ? db.prepare(q).bind(wk, TOP) : db.prepare(q).bind(TOP)).all();
-      const rows = (rs.results || []).map((r, i) => ({ rank: i + 1, name: r.display, level: r.level, score: r.score }));
-      const tot = await (week ? db.prepare('SELECT COUNT(*) AS c FROM users WHERE show_rank = 1 AND week_key = ? AND week_xp > 0').bind(wk) : db.prepare('SELECT COUNT(*) AS c FROM users WHERE show_rank = 1 AND xp > 0')).first();
-      return json({ rows, total: tot.c, me: u ? await scoreOf(db, u, week) : null });
+      let region = url.searchParams.get('scope') || 'w'; if (!RIDS.includes(region)) region = 'w';
+      const u = await auth(db, request);
+      const rs = await db.prepare('SELECT x.display AS display, x.level AS level, s.score AS score, s.p AS p, s.g AS g, s.a AS a, s.t AS t FROM scores s JOIN users x ON x.id = s.user_id WHERE x.show_rank = 1 AND s.region = ? AND s.score > 0 ORDER BY s.score DESC, s.a DESC, x.id ASC LIMIT ?').bind(region, TOP).all();
+      const rows = (rs.results || []).map((r, i) => ({ rank: i + 1, name: r.display, level: r.level, score: r.score, p: r.p, g: r.g, a: r.a, t: r.t }));
+      const tot = await db.prepare('SELECT COUNT(*) AS c FROM scores s JOIN users x ON x.id = s.user_id WHERE x.show_rank = 1 AND s.region = ? AND s.score > 0').bind(region).first();
+      return json({ rows, total: tot.c, region, me: u ? await scoreOf(db, u, region) : null });
     }
     // routes qui demandent d'être connecté
     const u = await auth(db, request);
@@ -140,6 +148,17 @@ async function onRequest({ request, env, params }) {
       const show = body.show === undefined ? u.show_rank : (body.show ? 1 : 0);
       await db.prepare('UPDATE users SET xp = ?, level = ?, day_key = ?, day_xp = ?, week_key = ?, week_xp = ?, synced = ?, show_rank = ?, data = ? WHERE id = ?')
         .bind(total, lvlOf(total), today, day, wk, week, synced, show, data, u.id).run();
+      if (body.rk && typeof body.rk === 'object') {
+        const st = [];
+        for (const id of RIDS) {
+          const r = body.rk[id]; if (!r || typeof r !== 'object') continue;
+          const t = Math.max(0, Math.min(2000, Math.floor(+r.t || 0))), a = Math.max(0, Math.min(t, Math.floor(+r.a || 0)));
+          const m = clamp01(r.m), p = clamp01(r.p), g = clamp01(r.g);
+          st.push(db.prepare('INSERT INTO scores (user_id, region, score, m, p, g, a, t, upd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, region) DO UPDATE SET score = excluded.score, m = excluded.m, p = excluded.p, g = excluded.g, a = excluded.a, t = excluded.t, upd = excluded.upd')
+            .bind(u.id, id, mastery(m, p, g), m, p, g, a, t, now()));
+        }
+        if (st.length) await db.batch(st);
+      }
       const nu = await db.prepare('SELECT * FROM users WHERE id = ?').bind(u.id).first();
       return json({ user: pub(nu), week_xp: week });
     }
@@ -150,6 +169,7 @@ async function onRequest({ request, env, params }) {
     if (route === 'delete' && method === 'POST') {
       if (!(await check(String(body.password || ''), u.salt, u.hash))) return err('Mot de passe incorrect.', 401);
       await db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(u.id).run();
+      await db.prepare('DELETE FROM scores WHERE user_id = ?').bind(u.id).run();
       await db.prepare('DELETE FROM users WHERE id = ?').bind(u.id).run();
       return json({ ok: true });
     }
